@@ -1,5 +1,6 @@
 # main.py
 import os
+import pandas as pd
 import subprocess
 from hybrid_detector import apply_hybrid_to_csv
 from rating_utils import rate_video
@@ -8,7 +9,7 @@ from rating_utils import rate_video
 
 MODEL_DIR   = r"tox_ft\best_model"   # หรือ tox_ft_pos\best_model แล้วแต่ของน้อง
 #CSV_INPUT   = r'Transcript\STOP BEING A PEOPLE PLEASER - Gary Vaynerchuk Motivation.csv'
-CSV_INPUT   = r'outputs\transcripts\transcript_clean.csv'
+CSV_INPUT   = r"testclean.csv"
 CSV_SCORES  = r"outputs\ver2_with_scores.csv"
 CSV_HYBRID  = r"outputs\ver2_with_scores_hybrid.csv"
 FLAG_OUTPUT = r"outputs\ver2_flagged.csv"
@@ -82,6 +83,17 @@ def main():
     print(f"\n💾 Rating saved to: {RATING_OUT}")
     print("\n🎉 ALL DONE\n")
 
+    print("=== CSV_INPUT ===")
+    df_in = pd.read_csv("testclean.csv")
+    print(df_in.loc[16, "text"])
 
+    print("=== ver2_with_scores ===")
+    df_scores = pd.read_csv("outputs/ver2_with_scores.csv")
+    print(df_scores.loc[16, "text"])
+
+    print("=== ver2_with_scores_hybrid ===")
+    df_h = pd.read_csv("outputs/ver2_with_scores_hybrid.csv")
+
+    print(df_h.loc[16, "text"])
 if __name__ == "__main__":
     main()

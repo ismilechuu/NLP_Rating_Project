@@ -1,0 +1,36 @@
+# สำหรับ data processing
+pandas==2.2.1
+numpy==1.26.4
+
+# สำหรับ regex / datetime / stdlib ไม่ต้องใส่ (มากับ Python)
+
+# สำหรับโมเดล Detoxify + PyTorch
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0
+
+# โมเดล Detoxify ใช้ librarie พวกนี้
+transformers==4.38.0
+tokenizers==0.15.1
+sentencepiece==0.1.99
+
+# Detoxify official package
+detoxify==0.6.1
+
+# สำหรับ tqdm (ถ้าใช้ใน train)
+tqdm==4.66.2
+
+# สำหรับ YAML (บางไฟล์อาจใช้)
+pyyaml==6.0.1
+
+
+# เริ่มจากพิมตามนี้ใน command line:
+# python -m venv .venv
+# .\.venv\Scripts\activate
+# pip install -r requirements.txt
+
+# ถ้าจะรัน preprocessing.py 
+# python txt_to_CSV.py "input.txt" "output.csv"
+# จะได้เป็นไฟล์ CSV ที่ clean แล้วออกมา
+# ใส่ path ให่ถูกแล้ว python main.py
+

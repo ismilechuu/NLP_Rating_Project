@@ -6,29 +6,40 @@ import os
 import pandas as pd
 
 # =========================
-# 1) Profanity / URL helpers
+# 1) Profanity / URL / LEET helpers
 # =========================
 
-# แปลง leet เฉพาะตัวอักษร ไม่แตะตัวเลข (กัน 20 -> 2o)
-'''LEET_MAP = str.maketrans({
+# Leet speak mapping: convert leet to normal letters (COMPLETE)
+LEET_MAP = str.maketrans({
     "@": "a",
-    "$": "s",
-    "!": "i",
-    "3": "e",
     "4": "a",
+    "$": "s",
+    "5": "s",
+    "!": "i",
+    "1": "i",
+    "|": "i",
+    "3": "e",
+    "0": "o",
     "7": "t",
-})'''
+    "#": "h",
+})
 
 PROFANITY_PATTERNS = [
-    # fuck
+    # fuck - all variants
     (r"f[\W_]*u[\W_]*c[\W_]*k+", "fuck"),
     (r"f+[\W_]*\*+[\W_]*k+", "fuck"),
+    (r"f\*+c[\W_]*k", "fuck"),  # f*ck, f**ck, f***ck variants
+    (r"fv[\W_]*c[\W_]*k", "fuck"),
+    (r"fuck[\W_]+(ing|i[\W_]*n[\W_]*g)", "fucking"),  # fuck-ing, fuck-i-n-g
+    (r"f[\W_]*u[\W_]*c[\W_]*k[\W_]*(ing|i[\W_]*n[\W_]*g)", "fucking"),  # f-u-c-k-ing
+    (r"f\*+c[\W_]*k[\W_]*(ing)?", "fucking"),  # f*cking, f**cking
+    
     # shit
     (r"s[\W_]*h[\W_]*i[\W_]*t+", "shit"),
     # bitch
     (r"b[\W_]*i[\W_]*t[\W_]*c[\W_]*h+", "bitch"),
-    # ass / asshole
-    (r"a[\W_]*s[\W_]*s[\W_]*h?[\W_]*o?[\W_]*l?[\W_]*e?", "ass"),
+    # ass / asshole - with word boundary to prevent "was such" matching
+    (r"\bas[\W_]*s(?:[\W_]*h[\W_]*o[\W_]*l[\W_]*e)?\b", "ass"),
     # damn
     (r"d[\W_]*a[\W_]*m[\W_]*n+", "damn"),
     # porn
@@ -49,8 +60,8 @@ def clean_text(s: str) -> str:
     s = str(s)
 
     # 1) normalize smart quotes → ปกติ
-    s = s.replace("“", '"').replace("”", '"')
-    s = s.replace("‘", "'").replace("’", "'")
+    s = s.replace(""", '"').replace(""", '"')
+    s = s.replace("'", "'").replace("'", "'")
 
     # 2) strip space
     s = s.strip()
@@ -68,34 +79,33 @@ def clean_text(s: str) -> str:
     # 5) remove URL
     s = URL_RE.sub(" ", s)
 
-    # 6) leet transform (only letters)
-    '''s = s.translate(LEET_MAP)'''
+    # 6) leet transform (only letters) - ENABLED & COMPLETE
+    s = s.translate(LEET_MAP)
 
     # 7) remove emoji / unicode
     s = re.sub(r"[\U00010000-\U0010ffff]", " ", s)
 
-    # 8) remove censor patterns f***, b.i.t.c.h
-    s = re.sub(r"(?<=\w)[\*\._]+(?=\w)", "", s)
-
-    # 9) ตัด possessive 's เช่น night's → night
+    # 8) ตัด possessive 's เช่น night's → night
     s = re.sub(r"\b(\w+)'s\b", r"\1", s)
 
-    # 10) decensor profanity
+    # 9) decensor profanity - WITH CASE INSENSITIVE FLAG (BEFORE removing censor markers)
     for pat, repl in PROFANITY_PATTERNS:
-        s = re.sub(pat, repl, s)
+        s = re.sub(pat, repl, s, flags=re.IGNORECASE)
+
+    # 10) remove censor patterns f***, b.i.t.c.h (AFTER profanity patterns)
+    s = re.sub(r"(?<=\w)[\*\._]+(?=\w)", "", s)
 
     # 11) remove ellipsis: … or ... 
     s = re.sub(r"[.…]+", " ", s)
 
-    # 12) normalize duplicate punctuation: !! → !, ?? → ?
-    s = re.sub(r"(!){2,}", "!", s)
-    s = re.sub(r"(\?){2,}", "?", s)
+    # 12) replace punctuation with space: ! ? , and dashes (-, –, —)
+    # Use space instead of empty string to prevent word concatenation
+    s = re.sub(r"[!?,\-–—]", " ", s)
 
-    # 13) normalize space
+    # 13) normalize space - MUST BE LAST (collapses multiple spaces to one)
     s = re.sub(r"\s+", " ", s).strip()
 
     return s
-
 
 
 # =========================
@@ -103,9 +113,15 @@ def clean_text(s: str) -> str:
 # =========================
 
 def norm_time_str(t: str) -> str:
-    """รับ 'HH:MM:SS' หรือ 'HH:MM:SS.xxx' -> คืน 'HH:MM:SS'"""
+    """รับ 'HH:MM:SS' หรือ 'HH:MM:SS.xxx' หรือ 'HH:MM' -> คืน 'HH:MM:SS'"""
     t = t.strip()
-    fmt = "%H:%M:%S.%f" if "." in t else "%H:%M:%S"
+    
+    # Determine format based on number of colons
+    if t.count(":") == 2:  # HH:MM:SS or HH:MM:SS.xxx
+        fmt = "%H:%M:%S.%f" if "." in t else "%H:%M:%S"
+    else:  # HH:MM
+        fmt = "%H:%M"
+    
     dt = datetime.strptime(t, fmt)
     return dt.strftime("%H:%M:%S")
 
@@ -113,7 +129,13 @@ def norm_time_str(t: str) -> str:
 def add_seconds_str(t: str, sec: int) -> str:
     """เพิ่มวินาทีให้เวลา (string)"""
     t = t.strip()
-    fmt = "%H:%M:%S.%f" if "." in t else "%H:%M:%S"
+    
+    # Determine format based on number of colons
+    if t.count(":") == 2:  # HH:MM:SS or HH:MM:SS.xxx
+        fmt = "%H:%M:%S.%f" if "." in t else "%H:%M:%S"
+    else:  # HH:MM
+        fmt = "%H:%M"
+    
     dt = datetime.strptime(t, fmt)
     dt2 = dt + timedelta(seconds=sec)
     return dt2.strftime("%H:%M:%S")
@@ -127,13 +149,16 @@ def parse_txt_to_rows(input_path: str):
     """
     รองรับรูปแบบเวลา:
     - 00:00:00 - 00:00:05 text
+    - 00:00 - 00:05 text
     - [00:00:00] text
+    - [00:00] text
     - 00:00:00 text
+    - 00:00 text
     แล้วคืน list ของ dict {start_time, end_time, text}
     """
 
-    # 00:00:00 - 00:00:05 text  (รองรับ '-', '–', '—')
-    range_pat = re.compile(
+    # 00:00:00 - 00:00:05 text (รองรับ '-', '–', '—')
+    range_pat_hms = re.compile(
         r"^\s*"
         r"(\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)"
         r"\s*[-–—]\s*"
@@ -141,14 +166,33 @@ def parse_txt_to_rows(input_path: str):
         r"\s+(.+)$"
     )
 
+    # 00:00 - 00:05 text
+    range_pat_hm = re.compile(
+        r"^\s*"
+        r"(\d{2}:\d{2})"
+        r"\s*[-–—]\s*"
+        r"(\d{2}:\d{2})"
+        r"\s+(.+)$"
+    )
+
     # [00:00:00] text
-    bracket_pat = re.compile(
+    bracket_pat_hms = re.compile(
         r"^\s*\[(\d{2}:\d{2}:\d{2})\]\s*(.+)$"
     )
 
+    # [00:00] text
+    bracket_pat_hm = re.compile(
+        r"^\s*\[(\d{2}:\d{2})\]\s*(.+)$"
+    )
+
     # 00:00:00 text
-    plain_pat = re.compile(
+    plain_pat_hms = re.compile(
         r"^\s*(\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s+(.+)$"
+    )
+
+    # 00:00 text
+    plain_pat_hm = re.compile(
+        r"^\s*(\d{2}:\d{2})\s+(.+)$"
     )
 
     rows = []
@@ -159,12 +203,16 @@ def parse_txt_to_rows(input_path: str):
             if not line.strip():
                 continue
 
-            m_range = range_pat.match(line)
-            m_br = bracket_pat.match(line)
-            m_plain = plain_pat.match(line)
+            # Try matching in order: range_pat_hms, range_pat_hm, bracket_pat_hms, bracket_pat_hm, plain_pat_hms, plain_pat_hm
+            m_range_hms = range_pat_hms.match(line)
+            m_range_hm = range_pat_hm.match(line)
+            m_br_hms = bracket_pat_hms.match(line)
+            m_br_hm = bracket_pat_hm.match(line)
+            m_plain_hms = plain_pat_hms.match(line)
+            m_plain_hm = plain_pat_hm.match(line)
 
-            if m_range:
-                start_raw, end_raw, text = m_range.groups()
+            if m_range_hms:
+                start_raw, end_raw, text = m_range_hms.groups()
                 start = norm_time_str(start_raw)
                 end = norm_time_str(end_raw)
 
@@ -178,8 +226,23 @@ def parse_txt_to_rows(input_path: str):
                     "text": clean_text(text),
                 })
 
-            elif m_br:
-                start_raw, text = m_br.groups()
+            elif m_range_hm:
+                start_raw, end_raw, text = m_range_hm.groups()
+                start = norm_time_str(start_raw)
+                end = norm_time_str(end_raw)
+
+                # กันเคส end <= start หรือ 00:00:00
+                if end <= start or end == "00:00:00":
+                    end = None
+
+                rows.append({
+                    "start_time": start,
+                    "end_time": end,
+                    "text": clean_text(text),
+                })
+
+            elif m_br_hms:
+                start_raw, text = m_br_hms.groups()
                 start = norm_time_str(start_raw)
 
                 rows.append({
@@ -188,8 +251,8 @@ def parse_txt_to_rows(input_path: str):
                     "text": clean_text(text),
                 })
 
-            elif m_plain:
-                start_raw, text = m_plain.groups()
+            elif m_br_hm:
+                start_raw, text = m_br_hm.groups()
                 start = norm_time_str(start_raw)
 
                 rows.append({
@@ -197,10 +260,29 @@ def parse_txt_to_rows(input_path: str):
                     "end_time": None,
                     "text": clean_text(text),
                 })
+
+            elif m_plain_hms:
+                start_raw, text = m_plain_hms.groups()
+                start = norm_time_str(start_raw)
+
+                rows.append({
+                    "start_time": start,
+                    "end_time": None,
+                    "text": clean_text(text),
+                })
+
+            elif m_plain_hm:
+                start_raw, text = m_plain_hm.groups()
+                start = norm_time_str(start_raw)
+
+                rows.append({
+                    "start_time": start,
+                    "end_time": None,
+                    "text": clean_text(text),
+                })
+
             else:
                 # format เพี้ยนมาก ข้ามบรรทัดนั้นไป
-                # ถ้าอยาก debug เปิด print ได้
-                # print("Skip line:", line)
                 continue
 
     # เติม end_time ที่ว่างด้วย start ของบรรทัดถัดไป หรือ +3 วิ

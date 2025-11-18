@@ -1,185 +1,233 @@
 # rating_utils.py
 # ไฟล์นี้ใช้ อ่าน CSV (ที่ hybrid แล้ว) แล้วสรุปเรต 13+/15+/18+/20+
 # ใช้ lexicon-based rules ร่วมกับค่า probability จากโมเดล
-import re
+
 import pandas as pd
-from hybrid_detector import PROFANITY_MILD, PROFANITY_STRONG, SEXUAL_STRONG_20, SEXUAL_MILD, VIOLENCE_STRONG_20, VIOLENCE_MILD
+import numpy as np
 
-# สร้าง set ของ token จาก dataframe
-# โดยเอาข้อความทุกแถวมาต่อกัน → ทำ token set หนึ่งชุด
-def _token_set_from_df(df: pd.DataFrame):
-    text_all = " ".join(df["text"].astype(str).tolist()).lower()
-    text_all = re.sub(r"[\"',!?()\[\]]", " ", text_all)
-    text_all = re.sub(r"\s+", " ", text_all).strip()
-    return set(text_all.split())
+# ========= CONFIG: เกณฑ์เรต (ปรับได้เองตรงนี้) =========
 
-# ฟังก์ชันหลัก: rate video จาก CSV path
-# อินพุต = CSV ที่ hybrid แล้ว (ver2_with_scores_hybrid.csv)
-# คืนค่า (rating_str, info_dict, debug_dict)
-#
+# 20+ : เนื้อหาเพศ/ความรุนแรงค่อนข้างรุนแรงและพบต่อเนื่อง
+THR_20_SEX_RATIO   = 0.50   # ถ้า strong sexual >= 50% ของทั้ง transcript → 20+
+THR_20_VIOL_RATIO  = 0.50   # ถ้า strong violence >= 50% ของทั้ง transcript → 20+
+
+# 18+ : ด่าหนัก / sexual ปานกลาง / hate speech พอสมควร
+THR_18_PROF_RATIO  = 0.2   # สัดส่วน profanity >= 20%
+THR_18_PROF_MAX    = 0.80   # หรือเคยด่าหนักมากสักครั้ง (prob >= 0.80)
+THR_18_SEX_RATIO   = 0.05   # sexual >= 5% ของทั้ง transcript
+THR_18_HATE_RATIO  = 0.02   # hate >= 2%
+THR_18_HATE_MAX    = 0.60   # และมี hate_prob สูง >= 0.60
+
+# 15+ : มีคำหยาบเรื่อย ๆ แต่ไม่ถึงขั้น 18+
+THR_15_PROF_RATIO  = 0.05   # profanity >= 5%  (อยากเข้ม/ผ่อน ปรับตรงนี้ได้)
+THR_15_PROF_MAX    = 0.60   # หรือมีคำหยาบแรงระดับกลางสักครั้ง
+
+
+# ========= HELPER ฟังก์ชันย่อย =========
+
+def _get_col(df: pd.DataFrame, hybrid: str, model: str) -> pd.Series:
+    """
+    เลือกใช้คอลัมน์ hybrid ก่อน ถ้าไม่มีค่อย fallback ไปคอลัมน์จากโมเดลโดยตรง
+    ถ้าไม่มีทั้งคู่ → คืน Series ที่เป็นศูนย์ทั้งหมด
+    """
+    if hybrid in df.columns:
+        return df[hybrid].fillna(0)
+    if model in df.columns:
+        return df[model].fillna(0)
+    return pd.Series(0, index=df.index, dtype=float)
+
+
+# ========= ฟังก์ชันหลัก =========
+
 def rate_video(csv_path: str):
+    """
+    อ่านไฟล์ CSV (หลัง hybrid แล้ว) แล้วสรุปเรตติ้งของทั้ง transcript
+
+    return:
+        rating           : "general" / "15+" / "18+" / "20+"
+        reason           : เหตุผลสั้น ๆ (สำหรับโชว์บน console / UI)
+        detailed_reason  : เหตุผลแบบละเอียด (สำหรับเขียนในไฟล์ Rating.txt)
+        debug            : dict ค่าตัวเลขต่าง ๆ เอาไว้ debug / log เพิ่มเติม
+    """
     df = pd.read_csv(csv_path)
 
+    # เคสไฟล์ว่าง
     if len(df) == 0:
-        return "UNKNOWN", {"reason": "no segments"}
+        rating = "general"
+        reason = "ไฟล์ไม่มีข้อมูล ไม่สามารถประเมินเรตได้"
+        detailed_reason = (
+            "ไฟล์ CSV ไม่มี segment ใด ๆ จึงถือว่าไม่มีเนื้อหาที่ต้องจำกัดเรต "
+            "กำหนดเป็นเรต 13+ โดยอัตโนมัติ"
+        )
+        debug = {"n_segments": 0}
+        return rating, reason, detailed_reason, debug
 
-    # ใช้ hybrid ถ้ามี ไม่มีก็ fallback
-    def col(name, fallback):
-        if name in df.columns:
-            return df[name]
-        return df[fallback]
+    n_segments = len(df)
 
-    prof_col = col("profanity_hybrid", "profanity")
-    sex_col  = col("sexual_hybrid", "sexual")
-    viol_col = col("violence_hybrid", "violence")
-    hate_col = col("hate_hybrid", "hate")
+    # ใช้ hybrid ก่อน ถ้าไม่มีค่อย fallback ไปคอลัมน์จากโมเดล
+    prof = _get_col(df, "profanity_hybrid", "profanity")
+    sex  = _get_col(df, "sexual_hybrid", "sexual")
+    viol = _get_col(df, "violence_hybrid", "violence")
+    hate = _get_col(df, "hate_hybrid", "hate")
 
-    # อัตราส่วน segment ที่โดนแต่ละหมวด
-    r_prof = prof_col.mean()
-    r_sex  = sex_col.mean()
-    r_viol = viol_col.mean()
-    r_hate = hate_col.mean()
+    # สัดส่วน segment ที่ถูกแท็กเป็นหมวดต่าง ๆ
+    r_prof = float(prof.mean())
+    r_sex  = float(sex.mean())
+    r_viol = float(viol.mean())
+    r_hate = float(hate.mean())
 
-    # จำนวน segment ที่โดนจริง ๆ
-    n_seg   = len(df)
-    n_prof  = int(prof_col.sum())
-    n_sex   = int(sex_col.sum())
-    n_viol  = int(viol_col.sum())
-    n_hate  = int(hate_col.sum())
+    # ค่า probability สูงสุดจากโมเดล (ถ้ามี)
+    max_prof = float(df.get("profanity_prob", pd.Series([0.0])).max())
+    max_sex  = float(df.get("sexual_prob",   pd.Series([0.0])).max())
+    max_viol = float(df.get("violence_prob", pd.Series([0.0])).max())
+    max_hate = float(df.get("hate_prob",     pd.Series([0.0])).max())
 
-    # max prob เผื่อใช้ใน rule
-    max_prof = df.get("profanity_prob", pd.Series([0])).max()
-    max_sex  = df.get("sexual_prob", pd.Series([0])).max()
-    max_viol = df.get("violence_prob", pd.Series([0])).max()
-    max_hate = df.get("hate_prob", pd.Series([0])).max()
+    # flag strong/mild จาก hybrid
+    has_prof_strong = bool(df.get("has_prof_strong", pd.Series([0])).astype(bool).any())
+    has_sex_strong  = bool(df.get("has_sex_strong",  pd.Series([0])).astype(bool).any())
+    has_sex_mild    = bool(df.get("has_sex_mild",    pd.Series([0])).astype(bool).any())
+    has_viol_strong = bool(df.get("has_viol_strong", pd.Series([0])).astype(bool).any())
+    has_viol_mild   = bool(df.get("has_viol_mild",   pd.Series([0])).astype(bool).any())
+    has_hate_slur   = bool(df.get("has_hate_slur",   pd.Series([0])).astype(bool).any())
 
-    tokens = _token_set_from_df(df)
+    # ======= เริ่มตัดสินเรต =======
+    rating = "general"
+    reason = ""
+    detailed_reason = ""
 
-    has_prof_strong = bool(df.get("has_prof_strong", pd.Series([0])).max())
-    has_sex_strong  = bool(df.get("has_sex_strong",  pd.Series([0])).max())
-    has_sex_mild    = bool(df.get("has_sex_mild",    pd.Series([0])).max())
-    has_viol_strong = bool(df.get("has_viol_strong", pd.Series([0])).max())
-    has_viol_mild   = bool(df.get("has_viol_mild",   pd.Series([0])).max())
+    # ---------- 20+ ----------
+    if has_sex_strong and r_sex >= THR_20_SEX_RATIO:
+        rating = "20+"
+        reason = "มีเนื้อหาเชิงเพศรุนแรง (strong sexual) และพบค่อนข้างบ่อย"
 
+        detailed_reason = (
+            "จัดเป็นเรต 20+ เพราะมีเนื้อหาเชิงเพศที่รุนแรงและพบต่อเนื่อง\n"
+            f"- พบ strong sexual content อย่างน้อย 1 ครั้ง (has_sex_strong = True)\n"
+            f"- สัดส่วน segment ที่เป็น sexual = {r_sex:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_20_SEX_RATIO:.2f})\n"
+            f"- ค่าความมั่นใจสูงสุดของ sexual จากโมเดล = {max_sex:.2f}\n"
+            #"เกณฑ์ที่ใช้: strong sexual + sexual_ratio ≥ THR_20_SEX_RATIO"
+        )
 
-    
+    elif has_viol_strong and r_viol >= THR_20_VIOL_RATIO:
+        rating = "20+"
+        reason = "มีเนื้อหาความรุนแรงรุนแรง (strong violence) และพบค่อนข้างบ่อย"
 
-    # ====== DEBUG INFO รวมทุกอย่างที่ใช้คิดเรท ======
+        detailed_reason = (
+            "จัดเป็นเรต 20+ เพราะมีเนื้อหาความรุนแรงที่ชัดเจนและพบต่อเนื่อง\n"
+            f"- พบ strong violence content อย่างน้อย 1 ครั้ง (has_viol_strong = True)\n"
+            f"- สัดส่วน segment ที่เป็น violence = {r_viol:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_20_VIOL_RATIO:.2f})\n"
+            f"- ค่าความมั่นใจสูงสุดของ violence จากโมเดล = {max_viol:.2f}\n"
+           # "เกณฑ์ที่ใช้: strong violence + violence_ratio ≥ THR_20_VIOL_RATIO"
+        )
+
+    # ---------- 18+ ----------
+    elif r_prof >= THR_18_PROF_RATIO:
+        rating = "18+"
+        reason = "มีคำหยาบปรากฏค่อนข้างบ่อยในหลายช่วงของคลิป"
+
+        detailed_reason = (
+            "จัดเป็นเรต 18+ เพราะมีคำหยาบกระจายอยู่ในหลาย segment ของ transcript\n"
+            f"- สัดส่วน segment ที่มี profanity = {r_prof:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_18_PROF_RATIO:.2f})\n"
+            #"เกณฑ์ที่ใช้: profanity_ratio ≥ THR_18_PROF_RATIO"
+        )
+
+    elif max_prof >= THR_18_PROF_MAX:
+        rating = "18+"
+        reason = "มีคำหยาบที่รุนแรงมากอย่างน้อย 1 ช่วง"
+
+        detailed_reason = (
+            "จัดเป็นเรต 18+ เพราะตรวจพบคำหยาบที่มีความรุนแรงสูงจากโมเดล\n"
+            f"- ค่าความมั่นใจสูงสุดของ profanity จากโมเดล = {max_prof:.2f} "
+            f"(มากกว่าเกณฑ์ {THR_18_PROF_MAX:.2f})\n"
+            "ถึงแม้สัดส่วนจะไม่เยอะมาก แต่ความรุนแรงของคำสูงพอให้จัดเป็น 18+\n"
+            #"เกณฑ์ที่ใช้: max_profanity_prob ≥ THR_18_PROF_MAX"
+        )
+
+    elif r_sex >= THR_18_SEX_RATIO:
+        rating = "18+"
+        reason = "มีเนื้อหาเชิงเพศในระดับปานกลางกระจายอยู่ในคลิป"
+
+        detailed_reason = (
+            "จัดเป็นเรต 18+ เพราะมีเนื้อหาเชิงเพศปรากฏอยู่ในหลายส่วนของ transcript\n"
+            f"- สัดส่วน segment ที่เป็น sexual = {r_sex:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_18_SEX_RATIO:.2f})\n"
+            f"- ค่าความมั่นใจสูงสุดของ sexual จากโมเดล = {max_sex:.2f}\n"
+            #"เกณฑ์ที่ใช้: sexual_ratio ≥ THR_18_SEX_RATIO"
+        )
+
+    elif r_hate >= THR_18_HATE_RATIO and max_hate >= THR_18_HATE_MAX:
+        rating = "18+"
+        reason = "มีเนื้อหา hate speech ต่อกลุ่มคนในระดับที่น่ากังวล"
+
+        detailed_reason = (
+            "จัดเป็นเรต 18+ เพราะพบประโยคที่เข้าข่าย hate speech ต่อกลุ่มคนอย่างชัดเจน\n"
+            f"- สัดส่วน segment ที่เป็น hate speech = {r_hate:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_18_HATE_RATIO:.2f})\n"
+            f"- ค่าความมั่นใจสูงสุดของ hate จากโมเดล = {max_hate:.2f} "
+            f"(มากกว่าเกณฑ์ {THR_18_HATE_MAX:.2f})\n"
+            #"เกณฑ์ที่ใช้: hate_ratio ≥ THR_18_HATE_RATIO และ max_hate_prob ≥ THR_18_HATE_MAX"
+        )
+
+    # ---------- 15+ ----------
+    elif r_prof >= THR_15_PROF_RATIO:
+        rating = "15+"
+        reason = "มีคำหยาบอยู่พอสมควร แต่ยังไม่ถึงระดับ 18+"
+
+        detailed_reason = (
+            "จัดเป็นเรต 15+ เพราะมีคำหยาบกระจายอยู่ในคลิประดับหนึ่ง\n"
+            f"- สัดส่วน segment ที่มี profanity = {r_prof:.2f} "
+            f"(มากกว่าเกณฑ์ขั้นต่ำ {THR_15_PROF_RATIO:.2f})\n"
+            f"- แต่ยังไม่ถึงเกณฑ์ 18+ (เช่น {THR_18_PROF_RATIO:.2f})\n"
+            #"เกณฑ์ที่ใช้: profanity_ratio อยู่ระหว่าง THR_15_PROF_RATIO และ THR_18_PROF_RATIO"
+        )
+
+    elif max_prof >= THR_15_PROF_MAX:
+        rating = "15+"
+        reason = "มีคำหยาบที่ค่อนข้างแรงอย่างน้อย 1 ช่วง"
+
+        detailed_reason = (
+            "จัดเป็นเรต 15+ เพราะพบคำหยาบที่ค่อนข้างแรง แม้จะไม่ได้เกิดขึ้นบ่อยมาก\n"
+            f"- ค่าความมั่นใจสูงสุดของ profanity จากโมเดล = {max_prof:.2f} "
+            f"(มากกว่าเกณฑ์ {THR_15_PROF_MAX:.2f})\n"
+            "แต่ความถี่รวมยังไม่สูงถึงระดับที่ต้องจัดเป็น 18+\n"
+            #"เกณฑ์ที่ใช้: max_profanity_prob ≥ THR_15_PROF_MAX"
+        )
+
+    # ---------- general ----------
+    else:
+        rating = "general"
+        reason = "เนื้อหาโดยรวมไม่มีคำหยาบ / sexual / ความรุนแรง / hate ในระดับที่ต้องจำกัดมากกว่านี้"
+
+        detailed_reason = (
+            "จัดเป็นเรต general เพราะค่าตัวชี้วัดทุกหมวดอยู่ต่ำกว่า threshold ที่กำหนด\n"
+            f"- r_prof (profanity ratio) = {r_prof:.2f}\n"
+            f"- r_sex  (sexual ratio)    = {r_sex:.2f}\n"
+            f"- r_viol (violence ratio)  = {r_viol:.2f}\n"
+            f"- r_hate (hate ratio)      = {r_hate:.2f}\n"
+            "ทั้งหมดไม่ถึงเกณฑ์ขั้นต่ำของเรต 15+, 18+, หรือ 20+\n"
+            #"เกณฑ์ที่ใช้: ทุก ratio < threshold ของแต่ละเรต"
+        )
+
+    # ========= debug summary =========
     debug = {
-        "n_segments": n_seg,
-        "n_prof_segments": n_prof,
-        "n_sex_segments": n_sex,
-        "n_viol_segments": n_viol,
-        "n_hate_segments": n_hate,
-
-        "r_prof": float(r_prof),
-        "r_sex": float(r_sex),
-        "r_viol": float(r_viol),
-        "r_hate": float(r_hate),
-
-        "max_prof_prob": float(max_prof),
-        "max_sex_prob": float(max_sex),
-        "max_viol_prob": float(max_viol),
-        "max_hate_prob": float(max_hate),
-
+        "n_segments": n_segments,
+        "r_prof": r_prof,
+        "r_sex": r_sex,
+        "r_viol": r_viol,
+        "r_hate": r_hate,
+        "max_prof": max_prof,
+        "max_sex": max_sex,
+        "max_viol": max_viol,
+        "max_hate": max_hate,
         "has_prof_strong": has_prof_strong,
         "has_sex_strong": has_sex_strong,
         "has_sex_mild": has_sex_mild,
         "has_viol_strong": has_viol_strong,
         "has_viol_mild": has_viol_mild,
-
-        # ตัวอย่าง token (เอาไว้ดูคร่าว ๆ)
-        "sample_tokens": sorted(list(tokens))[:40],
+        "has_hate_slur": has_hate_slur,
     }
-    '''
-    if verbose:
-        print("\n===== DEBUG RATING INPUT =====")
-        for k, v in debug.items():
-            print(f"{k}: {v}")
-        print("================================\n")
-    '''
-    # ---------- RULES ----------'
-    
-    # 20+ = ต้อง explicit จริง + โผล่พอสมควร
-    if (has_sex_strong and r_sex >= 0.20) or (has_viol_strong and r_viol >= 0.20):
-        return "20+", {
-            "r_prof": float(r_prof),
-            "r_sex": float(r_sex),
-            "r_viol": float(r_viol),
-            "r_hate": float(r_hate),
-            "reason": "explicit sexual/violent content (frequent)"
-        }, debug
 
-    # 2) 18+ : ภาษาหยาบหนัก / sexual/hate ปานกลาง
-    if (
-        r_prof >= 0.15 or
-        max_prof >= 0.8 or
-        r_sex >= 0.05 or
-        (r_hate >= 0.02 and max_hate >= 0.6)
-    ):
-        return "18+", {
-            "r_prof": float(r_prof),
-            "r_sex": float(r_sex),
-            "r_viol": float(r_viol),
-            "r_hate": float(r_hate),
-            "reason": "strong language and/or moderate sexual/hate content"
-        },debug
-
-    # 3) 15+ : คำหยาบมีระดับ (ไม่เบาจน 13+)
-    if (
-        r_prof >= 0.05 or
-        max_prof >= 0.6
-    ):
-        return "15+", {
-            "r_prof": float(r_prof),
-            "r_sex": float(r_sex),
-            "r_viol": float(r_viol),
-            "r_hate": float(r_hate),
-            "reason": "moderate profanity"
-        },debug
-
-    # 4) 13+ : แทบไม่มีอะไรน่าห่วง
-    return "13+", {
-        "r_prof": float(r_prof),
-        "r_sex": float(r_sex),
-        "r_viol": float(r_viol),
-        "r_hate": float(r_hate),
-        "reason": "minimal bad language"
-    },debug
-
-def save_debug(debug_dict, path="outputs/rating_debug.txt"):
-    """Save debug info as readable text file."""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("===== DEBUG RATING INPUT =====\n")
-        for k, v in debug_dict.items():
-            f.write(f"{k}: {v}\n")
-        f.write("================================\n")
-    print(f"💾 Debug saved to {path}")
-
-if __name__ == "__main__":
-    import argparse
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--csv", required=True)
-    ap.add_argument("--out", default="outputs/video_rating.txt")
-    args = ap.parse_args()
-
-    rating, info, debug = rate_video(args.csv)
-    print("⭐ RATING:", rating)
-    print("ℹ️", info)
-
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write("=========== VIDEO RATING RESULT ===========\n")
-        f.write(f"TITLE: {args.csv}\n")
-        f.write(f"RATING: {rating}\n")
-        f.write(f"REASON: {info['reason']}\n")
-        f.write(f"r_prof: {info['r_prof']:.4f}\n")
-        f.write(f"r_sex:  {info['r_sex']:.4f}\n")
-        f.write(f"r_viol: {info['r_viol']:.4f}\n")
-        f.write(f"r_hate: {info['r_hate']:.4f}\n")
-
-        f.write("\n\n=========== DEBUG INFORMATION ===========\n")
-        for k, v in debug.items():
-            f.write(f"{k}: {v}\n")
-        f.write("=========================================\n")
-
-    print(f"💾 Rating + Debug saved to: {args.out}")
+    return rating, reason, detailed_reason, debug

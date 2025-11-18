@@ -48,6 +48,14 @@ HATE_SLURS = {
     "chink", "spic", "wetback", "kike",
 }
 
+SEX_EDU_WHITELIST = {
+    "sex education",
+    "sex and gender",
+    "sex in school",
+    "sex chromosome",
+    "sex differences",
+}
+
 # ---------- 2) Decensor + tokenize ----------
 
 DECENSOR_PATTERNS = [
@@ -86,10 +94,9 @@ def hybrid_labels_for_row(
     token_set = set(tokens)
 
     # คำที่บ่งบอกว่า sex เป็น action จริง ๆ (ไม่ใช่วิชาการ)
-    SEX_ACTION_WORDS = {"have", "had", "having", "do", "did", "doing"}
-    SEX_PRONOUNS = {"i", "you", "we", "he", "she", "they"}
-    # time words ที่บอกบริบท sexual (ไม่ใส่ today เพราะจะทำให้ "sex education in school today" ติด)
-    SEX_TIME_WORDS = {"last", "tonight", "yesterday"}
+    SEX_ACTION_WORDS = {"have", "had", "having", "do", "did", "doing", "going", "was", "were"}
+    #SEX_PRONOUNS = {"i", "you", "we", "he", "she", "they"}
+    #SEX_TIME_WORDS = {"last", "tonight", "yesterday"}
 
     # 1) ดึง prob จากโมเดล
     p_prof = float(row.get("profanity_prob", 0.0))
@@ -103,22 +110,23 @@ def hybrid_labels_for_row(
     has_prof_mild = len(token_set & PROFANITY_MILD) > 0
     has_prof_strong = len(token_set & PROFANITY_STRONG) > 0
 
-    # sexual strong / mild
+    # sexual logic
+    clean = s  # clean string จาก clean_and_tokenize
+    is_edu_sex = any(phrase in clean for phrase in SEX_EDU_WHITELIST)
+    # strong words เช่น pussy, dick, blowjob, porn
     sex_count_strong = sum(1 for t in tokens if t in SEXUAL_STRONG_20)
-    sex_count_mild = sum(1 for t in tokens if t in SEXUAL_MILD)
-
     has_sex_strong = sex_count_strong >= 1
 
-    # เช็ค context สำหรับ sex แบบ mild (กันเคส "sex education")
+    # mild word: sex
+    sex_count_mild = sum(1 for t in tokens if t in SEXUAL_MILD)
     has_sex_word = sex_count_mild >= 1
-    has_sex_action_word = any(t in SEX_ACTION_WORDS for t in tokens)
-    has_sex_pronoun = any(t in SEX_PRONOUNS for t in tokens)
-    has_sex_time_word = any(t in SEX_TIME_WORDS for t in tokens)
 
-    # mild sexual ต้องมี sex + (action/pronoun/time)
-    has_sex_mild = has_sex_word and (
-        has_sex_action_word or has_sex_pronoun or has_sex_time_word
-    )
+    # detect action: had sex / have sex / doing sex
+    has_sex_action_word = any(t in SEX_ACTION_WORDS for t in tokens)
+
+    # mild = sex + action (กันเคส sex education)
+    has_sex_mild = has_sex_word and has_sex_action_word
+
 
     # violence strong / mild
     viol_count_strong = sum(1 for t in tokens if t in VIOLENCE_STRONG_20)
@@ -142,12 +150,14 @@ def hybrid_labels_for_row(
     # sexual: ใช้ lexicon เป็นหลัก ถ้าไม่มีค่อยให้โมเดลช่วย
     has_any_sex_lex = has_sex_strong or has_sex_mild
 
-    if has_any_sex_lex:
-        # มีคำ sexual อยู่แล้ว → ถือว่า sexual แม้ prob จะต่ำ
+    if is_edu_sex:
+    # เคส educational → ไม่ใช่ sexual แน่นอน
+        sexual_hybrid = 0
+    elif has_any_sex_lex:
+        # มีคำ sexual อยู่จริง (strong/mild) → sexual แน่นอน
         sexual_hybrid = 1
     else:
-        # ไม่มีคำ sexual ในประโยคเลย
-        # ให้โมเดลตัดสินได้เฉพาะตอนที่มั่นใจมาก และต้องไม่ใช่ profanity นำ
+        # ใช้โมเดลตัดสินเฉพาะคำที่ model มั่นใจมาก
         sexual_hybrid = int((p_sex >= thr_sex) and (p_prof < thr_prof))
 
     violence_hybrid = int(
@@ -176,6 +186,7 @@ def apply_hybrid_to_csv(csv_in: str, csv_out: str):
     df = pd.read_csv(csv_in)
 
     hybrid_rows = []
+        
     for _, row in df.iterrows():
         hybrid = hybrid_labels_for_row(row)
         hybrid_rows.append(hybrid)

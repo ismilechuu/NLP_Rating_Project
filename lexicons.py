@@ -302,10 +302,59 @@ HATE_SLURS = {
     "spicfuck"
 }
 
-SEX_EDU_WHITELIST = {
+WHITELIST = {
+    # Educational contexts
     "sex education",
     "sex and gender",
-    "sex in school",
     "sex chromosome",
+    "sex chromosomes",
     "sex differences",
+    "biological sex",
+    "sex determination",
+    "sex-linked genes",
+    "sex-linked gene",
+    "sex hormones",
+    "sex hormone",
+    "sex cells",
+    "sex cell",
+    "sex organs in biology",
+    "teaching about sex",
+    "learn about sex",
+    "learning about sex",
+    "sex ed class",
+    "sex ed curriculum",
+    "sex education class",
+    "sex education program",
+    "sex education curriculum",
+
+    # Medical/Scientific contexts
+    "sexual health",
+    "sexual health education",
+    "sexual reproduction",
+    "sexual development",
+    "sexual maturity",
+    "sexual orientation",
+    "sexual identity",
+    "sexual wellness",
+
+    # Social/Academic contexts
+    "sex and relationships education",
+    "sex trafficking awareness",
+    "sex trafficking prevention",
+    "sex discrimination",
+    "sex equality",
+    "sex-based violence prevention",
+    "sex-based discrimination",
+    "gender and sex",
+    "sex vs gender",
+    "sex assigned at birth",
+    "sex characteristics",
+    "sex ratio",
+    "sex selection",
+    "sex segregation",
+    "sex stereotypes",
+    "sex roles",
+    "sex differences in",
+    "sex-specific",
+    "sex-related",
 }

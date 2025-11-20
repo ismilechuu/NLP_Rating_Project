@@ -9,7 +9,7 @@ from lexicons import (
     PROFANITY_STRONG,
     SEXUAL_STRONG,
     SEXUAL_MILD,  
-    SEX_EDU_WHITELIST,
+    WHITELIST,
     VIOLENT_MILD ,
     VIOLENT_STRONG,
     HATE_SLURS,
@@ -59,7 +59,7 @@ def hybrid_labels_for_row(
 
     # sexual logic
     clean = s  # clean string จาก clean_and_tokenize
-    is_edu_sex = any(phrase in clean for phrase in SEX_EDU_WHITELIST)
+    is_edu_sex = any(phrase in clean for phrase in WHITELIST)
     sex_count_strong = sum(1 for t in tokens if t in SEXUAL_STRONG)
     has_sex_strong = sex_count_strong >= 1
 
@@ -100,7 +100,11 @@ def hybrid_labels_for_row(
         sexual_hybrid = 1
     else:
         # ใช้โมเดลตัดสินเฉพาะคำที่ model มั่นใจมาก
-        sexual_hybrid = int(p_sex >= thr_sex) #and (p_prof < thr_prof)
+        # แต่ถ้า profanity score สูงกว่า sexual → มักเป็น profanity ไม่ใช่ sexual
+        if p_sex >= thr_sex and p_sex > p_prof:
+            sexual_hybrid = 1
+        else:
+            sexual_hybrid = 0
 
     violence_hybrid = int(
         (p_viol >= thr_viol) or has_viol_strong or has_viol_mild
